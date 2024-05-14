@@ -1,0 +1,1149 @@
+---
+title: "Residential Water Use Characterization in the United States - Johanna Capone and Sachi Chitre"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding=encoding, output_dir = "./static-dashboard-master") })
+---
+
+```{r setup, include=TRUE}
+options(knitr.duplicate.label = "allow")
+knitr::opts_chunk$set(
+  # cache = TRUE,
+  fig.height = 5,
+  echo = FALSE
+)
+
+setwd("/Users/sachichitre/Library/CloudStorage/OneDrive-VirginiaTech/Fall2023/CMDA4654/Project1")
+
+library(tidyverse) 
+library(pander)
+library(xtable)
+library(kableExtra)
+library(dplyr)
+library(broom)
+library(glmnet)
+library(GGally)
+library(ggplot2)
+library(caret)
+library(e1071)
+library(ISLR2)
+library(splines)
+library(olsrr)
+library(crosstalk)
+library(glue)
+library(plotly)
+library(leaps)
+library(car)
+library(fANCOVA)
+library(FNN)
+library(gridExtra)
+library(gmodels)
+```
+
+```{js}
+const setDefaultValue = function(filterId, defaultValue) {
+  window.addEventListener("load", function(event) { 
+    document.getElementById(filterId).getElementsByClassName("selectized")[0].selectize.setValue(defaultValue, false);
+  });
+};
+```
+
+# Overview
+
+## Column
+
+### Background
+
+Recent droughts and population growth in drought-prone areas of the United States have exacerbated the challenge of securing reliable water supplies. Water districts historically sought new sources when supplies ran low. However, unreliable and costly water imports have promoted advancements in water conservation to reduce demand. It is important to understand the socio-economic-physical drivers of water demand to better promote water conservation practices and target high-water use groups. This dashboard displays different socio-economic-physical factors correlated with water use to decompose and understand drivers of water use. The research question we seek to better understand is: What are the socio-economic-physical factors that drive high water demand throughout different climate regions in the United States? Each analysis seeks to better understand a different part of this very broad research question. These sub-analyses will be distinctly highlighted in the corresponding sections, when applicable.
+
+The Municipal Water Characteristics dataset combines two datasets from the 
+Municipal Water Use dataset (https://drive.google.com/file/d/14GvhZ_XoHtlMtbYDwtN4yqlfDPLSikCY/view?usp=drive_link) and the City Characteristics dataset (https://drive.google.com/file/d/1eywdMAWENeGqHX8JM3mxMlqyPBADpKSI/view?usp=drive_link) [1].
+
+This data pertains to Agriculture/Environment/Ecology/Climate (1).
+
+Who did what?
+
+Johanna Capone: Ridge Regression, Naive Bayes, Logistic Regression
+
+Sachi Chitre: MLR, kNN, LOESS
+
+## Column
+
+### Variables Description
+
+**Climate_region** Describes the Climate Region for that city (Arid, Temperate,
+                    Continental). 
+                    
+**US_census_region** Describes the US Regions (South, Northeast, West, Midwest). 
+
+**Percent.single.family.houses** Percent of Single Family Homes. 
+
+**Median.rooms** Median number of rooms per house. 
+
+**Pop.density.log** Aggregated column for the log(population density [ppl / m^2]). 
+
+**Annual.max.temperature** Max Annual Temperature per city [degrees C]. 
+
+**Annual.vapor.pressure.deficit** Annual Vapor Pressure Deficit [NA]. 
+
+**Annual.precipitation** Annual Precipitation for that city [in]. 
+
+**Family.income.2010** Family Income [USD / year]. 
+
+**GDP.per.capita.2016** Gross Domestic Product per Capita [USD / year]. 
+
+**Water.percap.res** Water per Capita for residents of each city [gallon / person / month][GPCM]. 
+
+# Multiple Linear Regression
+
+```{r}
+# Load data
+Water <- read.csv("./Municipal_water_uses_dataset_2005-2017.csv", header = TRUE)
+Char <- read.csv("./City-characteristics.csv", header = TRUE)
+```
+
+```{r}
+# Clean Data
+
+# Separate day, month, and year
+
+Water <- Water %>%
+  separate(date, sep="/", into = c( "month", "day", "year"))
+
+# Filter to select summer months in 2016
+#Water_sum <- filter(Water, month %in% c(6, 7, 8)) would keep if we wanted to filter out the summer months
+Water_filt <- filter(Water, year %in% c(2016))
+Water_filt$month <- as.numeric(Water_filt$month)
+Water_filt$day <- as.numeric(Water_filt$day)
+Water_filt$year <- as.numeric(Water_filt$year)
+Water_filt <- Water_filt[,!(names(Water_filt) %in% c('USCensusID', 'month', 'day'))]
+
+# Group by city and average water use over the summer
+Water_gb <- Water_filt %>%
+  group_by(city) %>%
+  summarise(across(everything(), mean))
+
+# Remove "city" from characteristics dataframe
+Char <- Char %>%  mutate(City = str_remove_all(City, " town"))
+Char <- Char %>%  mutate(City = str_remove_all(City, " city"))
+
+# Merge the dataframes
+Water_Char <- merge(Water_gb, Char, by.x = "city", 
+             by.y = "City", all.x = TRUE, all.y = TRUE)
+
+# Remove the two cities that don't have 2016 data
+Water_Char <- Water_Char %>% drop_na(city)
+
+# Add water use per capita 
+Water_Char$Pop.density.log <-  log((Water_Char$population / Water_Char$Service.area.sq.meters))
+
+# Remove columns we don't want
+Water_Char_res <- subset(Water_Char, select = -c(2, 5, 6, 8, 9, 12:24, 26:37, 39:50, 52:73))
+
+# Drop NA
+Water_Char_res <- na.omit(Water_Char_res)
+
+# Create res percap column
+Water_Char_res$Water.percap.res <-  (Water_Char_res$res_billed_gallons / Water_Char_res$population)
+
+# Remove amarillo TX since they are predominantly an industrial town and residential water use is not reflective--> outlier
+Water_Char_res <- Water_Char_res[-c(5), ]
+ 
+```
+
+## Column
+### Problem
+Question: Which climate region has the most influence on water per capita for
+          residents?
+          
+
+### Selecting the "best" model
+
+As shown in the summary for the model selection and plots for the Adjusted R-squared,
+Mallows C(p) and BIC, the "best" model is the one with 4 predictor variables:
+Climate_region, Annual.Precipitation, Median.rooms, and Pop.density.log.
+
+This was the "best" model as it provided evidence of parsimony, had one of the 
+highest adjusted R-Squared values, and the lowest Mallows C(p) and BIC values.
+
+```{r}
+Water_Char_full <- Water_Char_res %>% select(c(Climate_region,
+                                                US_census_region,
+                                                Percent.single.family.houses,
+                                                Percent.medium.density.houses,
+                                                Percent.high.density.houses,
+                                                Percent.impervious.area,
+                                                Percent.housing.units.built.before.1950,
+                                                Percent.housing.units.built.between.1950.1989,
+                                                Percent.housing.units.built.earlier.to.1990,
+                                                Percent.housing.units.built.1990.or.later,
+                                                Median.rooms,
+                                                Pop.density.log,
+                                                Annual.max.temperature,
+                                                Annual.vapor.pressure.deficit,
+                                                Annual.precipitation,
+                                                Family.income.2010,
+                                                GDP.per.capita.2016,
+                                                Water.percap.res))
+
+best_subsets_reg_f_Climate <- regsubsets(Water.percap.res ~ Climate_region + Annual.precipitation +
+                   Family.income.2010 + GDP.per.capita.2016 +
+                   Percent.single.family.houses +
+                   Percent.housing.units.built.earlier.to.1990 + Median.rooms +
+                   Pop.density.log,
+                  data = Water_Char_full)
+best_subsets_reg_f_Climate_results <- summary(best_subsets_reg_f_Climate)
+tmpdf <- data.frame(best_subsets_reg_f_Climate_results$outmat,
+                   "adjR2" = best_subsets_reg_f_Climate_results$adjr2,
+                   "Cp" = best_subsets_reg_f_Climate_results$cp,
+                   "BIC" = best_subsets_reg_f_Climate_results$bic)
+
+tmpdf
+
+```
+### Multiple Linear Regression Model
+Summary of Coefficients for Full Model
+
+Based on this summary of the coefficients for the model, the Intercept does not
+seem to be significant. The Temperate Climate Region also does not seem to be
+significant, but we would need more evidence before we can eliminate the variables.
+```{r}
+modfit_f_Climate <- lm(Water.percap.res ~ Climate_region + Annual.precipitation + 
+                 Median.rooms + Pop.density.log, 
+             data = Water_Char_full)
+
+# Coefficients
+# Arid is base
+summary(modfit_f_Climate)$coefficients
+```
+
+Summary of Coefficients for Reduced Model
+
+Based on this summary of coefficients for the model, all of these predictor
+variables are significant. We can perform a partial F-test to see which model
+to use.
+```{r}
+modfit_f_Climate_reduced <- lm(Water.percap.res ~ Annual.precipitation + 
+                 Median.rooms + Pop.density.log, 
+             data = Water_Char_full)
+
+# Coefficients
+# Arid is base
+summary(modfit_f_Climate_reduced)$coefficients
+```
+Partial F-Test
+
+From the Partial F-test, the result of the p-value was significant. This means
+that we will use the reduced model for our MLR.
+```{r}
+# partial f-test significant p-value, use reduced model
+anova(modfit_f_Climate_reduced, modfit_f_Climate)
+```
+
+### Checking for Multicollinearity
+We chose the inital predictor variables for this model to be from each individual
+category of the variables. For example, in the dataset, there were many similar
+variables that we chose to pick one of each from to avoid multicollinearity.
+Here, we are checking if multicollinearity exists in the reduced model.
+The kappa value is not very high and this is shown through the appropriate VIF
+values for each of the predictor variables being between 1 and 5.
+Based on these values, we can see that there is no evidence of multicollinearity.
+```{r}
+kappa( t(model.matrix(modfit_f_Climate_reduced)) %*% model.matrix(modfit_f_Climate_reduced) )
+cor( Water_Char_full[, c("Annual.precipitation",
+                                     "Median.rooms", "Pop.density.log")] )
+vif(modfit_f_Climate_reduced)
+```
+
+### MLR Plots for each Predictor Variable
+
+```{r, fig.width=9, fig.height=8, fig.align='center'}
+plot1 <- ggplot(Water_Char_full, aes(x = Annual.precipitation, y = Water.percap.res, 
+                            color = Climate_region)) + geom_point() +
+        geom_smooth(method = "lm", se = F) + theme_bw() + 
+        ggtitle("Water per Capita versus Annual Precipitation")  + 
+  labs(x = "Annual precipitation", y = "Water per Capita", color = "Climate Region")
+
+plot2 <- ggplot(Water_Char_full, aes(x = Median.rooms, y = Water.percap.res, 
+                            color = Climate_region)) + geom_point() +
+          geom_smooth(method = "lm", se = F) + theme_bw() + 
+          ggtitle("Water per Capita versus Median Rooms") + 
+  labs(x = "Median Rooms", y = "Water per Capita", color = "Climate Region")
+
+plot3 <- ggplot(Water_Char_full, aes(x = Pop.density.log, y = Water.percap.res, 
+                            color = Climate_region)) + geom_point() +
+          geom_smooth(method = "lm", se = F) + theme_bw() + 
+          ggtitle("Water per Capita versus Population Density (log)") + 
+  labs(x = "Population Density", y = "Water per Capita", color = "Climate Region")
+grid.arrange(plot1, plot2, plot3, nrow = 3)
+```
+### MLR Plots Discussion
+As Annual precipitation increases, water per capita use for residents stays constant
+for Temperate climate regions. The water per capita decreases for lower annual
+precipitations for Arid climate regions. The water per capita decreases as annual
+precipitations increase for Continental climate regions.
+
+As the Median Rooms increase, the water per capita increases for Continental and
+Arid climate regions, and stays constant for Temperate climate regions.
+
+As the Population Density decreases, water per capita decreases for Arid and 
+Temperate climate regions and stays constant for Continental regions.
+
+### MLR Plots with WLS
+
+```{r, echo=FALSE,results='hide',fig.keep='all', fig.width=8, fig.height=17, fig.align = 'center'}
+# Weighted Least Squares on Model
+# Annual Precipitation
+modfit_AnnualPrecip <- lm(Water.percap.res ~ Annual.precipitation, data = Water_Char_full)
+modfit_AnnualPrecip$coefficients
+AnnualPrecip <- data.frame(Water_Char_full$Annual.precipitation, Water_Char_full$Water.percap.res)
+# ggplot(AnnualPrecip, aes(x = fitted(modfit_AnnualPrecip), y = residuals(modfit_AnnualPrecip))) + geom_point() + theme_bw() +
+# geom_hline(yintercept = 0)
+modfit1_resid_fit_AnnualPrecip <- lm( abs(residuals(modfit_AnnualPrecip)) ~ Water_Char_full$Annual.precipitation )
+wts_AnnualPrecip <- 1 / fitted(modfit1_resid_fit_AnnualPrecip)^2
+wts_AnnualPrecip
+# ggplot(AnnualPrecip, aes(x = Water_Char_full$Annual.precipitation, y = abs(residuals(modfit1_resid_fit_AnnualPrecip)))) + theme_bw() + geom_point() + geom_smooth(method = "lm", se = F)
+modfit2_weighted_LS_AnnualPrecip <- lm(Water_Char_full$Water.percap.res ~ Water_Char_full$Annual.precipitation, weights = wts_AnnualPrecip, data = AnnualPrecip)
+AnnualPrecip$weights <- wts_AnnualPrecip
+plot4 <- ggplot(AnnualPrecip, aes(x = Water_Char_full$Annual.precipitation, y = Water_Char_full$Water.percap.res, size = wts_AnnualPrecip, color = Water_Char_full$Climate_region)) + theme_bw() + geom_point(shape = 21) +
+geom_smooth(method = "lm", mapping = aes(weight = wts_AnnualPrecip), se = F, show.legend = F) +
+geom_smooth(method = "lm", se = F, color = "black", show.legend = F) + ggtitle("WLS and MLR for Water Per Capita versus Annual Precipitation for each Climate Region") + 
+  labs(x = "Annual precipitation", y = "Water per Capita", color = "Climate Region", size = "Weights for Annual Precipitation")
+
+
+
+# Median Rooms
+modfit_MedRooms <- lm(Water.percap.res ~ Median.rooms, data = Water_Char_full)
+modfit_MedRooms$coefficients
+MedRooms <- data.frame(Water_Char_full$Median.rooms, Water_Char_full$Water.percap.res)
+# ggplot(MedRooms, aes(x = fitted(modfit_MedRooms), y = residuals(modfit_MedRooms))) + geom_point() + theme_bw() +
+# geom_hline(yintercept = 0)
+modfit1_resid_fit_MedRooms <- lm( abs(residuals(modfit_MedRooms)) ~ Water_Char_full$Median.rooms )
+wts_MedRooms <- 1 / fitted(modfit1_resid_fit_MedRooms)^2
+wts_MedRooms
+# ggplot(MedRooms, aes(x = Water_Char_full$Median.rooms, y = abs(residuals(modfit1_resid_fit_MedRooms)))) + theme_bw() + geom_point() + geom_smooth(method = "lm", se = F)
+modfit2_weighted_LS_MedRooms <- lm(Water_Char_full$Water.percap.res ~ Water_Char_full$Median.rooms, weights = wts_MedRooms, data = MedRooms)
+MedRooms$weights <- wts_MedRooms
+plot5 <- ggplot(MedRooms, aes(x = Water_Char_full$Median.rooms, y = Water_Char_full$Water.percap.res, size = wts_MedRooms, color = Water_Char_full$Climate_region)) + theme_bw() + geom_point(shape = 21) +
+geom_smooth(method = "lm", mapping = aes(weight = wts_MedRooms), se = F, show.legend = F) +
+geom_smooth(method = "lm", se = F, color = "black", show.legend = F) + ggtitle("WLS and MLR for Water Per Capita versus Median Rooms for each Climate Region") + 
+  labs(x = "Median Rooms", y = "Water per Capita", color = "Climate Region", size = "Weights for Median Rooms")
+
+
+
+# Pop.density.log
+modfit_Pop <- lm(Water.percap.res ~ Pop.density.log, data = Water_Char_full)
+modfit_Pop$coefficients
+Pop <- data.frame(Water_Char_full$Pop.density.log, Water_Char_full$Water.percap.res)
+# ggplot(Pop, aes(x = fitted(modfit_Pop), y = residuals(modfit_Pop))) + geom_point() + theme_bw() +
+# geom_hline(yintercept = 0)
+modfit1_resid_fit_Pop <- lm( abs(residuals(modfit_Pop)) ~ Water_Char_full$Pop.density.log )
+wts_Pop <- 1 / fitted(modfit1_resid_fit_Pop)^2
+wts_Pop
+# ggplot(Pop, aes(x = Water_Char_full$Pop.density.log, y = abs(residuals(modfit1_resid_fit_Pop)))) + theme_bw() + geom_point() + geom_smooth(method = "lm", se = F)
+modfit2_weighted_LS_Pop <- lm(Water_Char_full$Water.percap.res ~ Water_Char_full$Pop.density.log, weights = wts_Pop, data = Pop)
+Pop$weights <- wts_Pop
+plot6 <- ggplot(Pop, aes(x = Water_Char_full$Pop.density.log, y = Water_Char_full$Water.percap.res, size = wts_Pop, color = Water_Char_full$Climate_region)) + theme_bw() + geom_point(shape = 21) +
+geom_smooth(method = "lm", mapping = aes(weight = wts_Pop), se = F, show.legend = F) +
+geom_smooth(method = "lm", se = F, color = "black", show.legend = F) + ggtitle("WLS and MLR for Water Per Capita versus Population Density (log) for each Climate Region") + 
+  labs(x = "Population Density", y = "Water per Capita", color = "Climate Region", size = "Weights for Population Density")
+
+
+grid.arrange(plot4, plot5, plot6, nrow = 3)
+```
+
+### MLR and WLS Plot Discussion
+For Annual Precipitation, we can see that the Arid climate region has smaller
+weights, Continental has midweights, and Temperate has the larger weights, which
+best explains why our regression line is being downweighted by the Temperate 
+variable. This also explains why Temperate was insignificant as compared to Arid
+and Continental climate regions, the Temperate level is significantly different
+than the other two. I can tell that as Annual Precipitation increases with 
+more Temperate and Continental weather, the Water per capita decreases.
+
+For Median rooms, it seems like the weights are evenly distributed. The line of
+best fit is being downweighted by Temperate but also is following a data point
+located to the far right of the overall plot. Most of the observations fall in 
+the center of the plot, with very few trailing to the right. I can tell that
+the fewer number of median rooms leads to a lesser water per capita in areas that
+are mainly Continental. Arid regions tend to have a mid number of median rooms, but
+high water per capita.
+
+For Population Density, it looks like Water per capita increases in Arid regions,
+and decreases in Continental regions. The line of best fits are following the 
+"outliers", which for Arid regions, is lifting the line, but for Continental and
+Temperate regions, the line of best fit is being downweighted and leaning towards
+the higher weighted observations.  
+
+### Final Model and Conclusion
+The final model was y = -164.7893Intercept - 15.8698Annual.precipitation + 399.9417Median.rooms -177.5278Pop.density.log.
+
+To answer the question above, it is seen that Arid climate regions have an increase
+on water per capita use especially with higher population densities and low annual
+precipitations. Temperate climate regions have a decent amount of water per capita
+expenditure for each of the three predictor variables. This makes sense as people
+would use more water in drier temperatures.
+
+## Column
+### Plots for Model Selection
+
+```{r, fig.width=5, fig.height=5, fig.align = 'center'}
+ggplot(tmpdf, aes(x = 1:8, y = adjR2)) + geom_point(size = 3) + geom_line() +
+labs(x = "Number of variables", y = "Adjusted R-squared", title = "Adjusted R-Squared") + theme_bw() +
+scale_x_continuous(breaks = 1:8)
+
+ggplot(tmpdf, aes(x = 1:8, y = Cp)) + geom_point(size = 3) + geom_line() + theme_bw() +
+labs(x = "Number of variables", y = "Cp", title = "Mallow's Cp by Number of Predictors") + scale_x_continuous(breaks = 1:8)
+
+ggplot(tmpdf, aes(x = 1:8, y = BIC)) + geom_point(size = 3) + geom_line() +
+labs(x = "Number of variables", y = "BIC", title = "BIC by Number of Predictors") + theme_bw() + scale_x_continuous(breaks = 1:8)
+```
+
+
+### Checking Assumptions on Full Model
+The Normality Assumption and Constant Variance assumption appear to be met.
+The data points are along the line of best fit for the normality assumption.
+For the constant variance assumption, there is an even spread of the data points
+and no shape that's standing out.
+
+The Linearity assumption appears to be met with the Annual.precipitation variable,
+but not so much with the other two numeric predictor variables.
+
+```{r, echo=FALSE,results='hide',fig.keep='all', fig.width=5, fig.height=8, fig.align = 'center'}
+par(mfrow = c(2, 1))
+plot(modfit_f_Climate$fitted, Water_Char_full$Water.percap.res, 
+     pch = 20, col = "blue", ylab = "Y", xlab = "Yhat", main = "Observed versus Fitted values for Full Model") + 
+  abline(0, 1, lty=2, col="red")
+
+plot(rstudent(modfit_f_Climate) ~ fitted(modfit_f_Climate), 
+     pch=19, las=1, xlab = "Fitted Values", ylab="Standardized Residuals", main = "Residuals versus Fitted values for Full Model", ) + 
+  abline(h=0)
+
+
+ggpairs(Water_Char_full, columns = c("Water.percap.res", 
+                                     "Climate_region", 
+                                     "Annual.precipitation",
+                                     "Median.rooms",
+                                     "Pop.density.log"),
+upper = list(continuous = "smooth"), lower = list(continuous = "cor") , title = "Correlation Matrix")
+```
+
+### Checking Assumptions on Reduced Model
+Below, we can see that the normality assumption has been met as the points follow
+the line of best fit. The constant variance assumption has also been met as the
+data points are evenly spread out.
+
+### Reduced Plots
+
+```{r, echo=FALSE,results='hide',fig.keep='all', fig.width=5, fig.height=8, fig.align = 'center'}
+# Normality Assumption
+par(mfrow = c(2, 1))
+plot(modfit_f_Climate_reduced$fitted, Water_Char_full$Water.percap.res,
+     pch = 20, col = "blue", ylab = "Y", xlab = "Yhat", main = "Observed versus Fitted values 
+     for Reduced Model") + 
+  abline(0, 1, lty=2, col="red")
+
+# Constant Variance Assumption
+plot(rstudent(modfit_f_Climate_reduced) ~ fitted(modfit_f_Climate_reduced),
+     pch=19, las=1, xlab = "Fitted Values", ylab="Standardized Residuals", main = "Residuals versus Fitted values 
+     for Reduced Model") + 
+  abline(h=0)
+```
+
+<!-- ### Summary Statistics for Multiple Linear Regression -->
+
+```{r}
+# Select subset of relevant variables
+
+Water_Char_sub <- Water_Char_res %>% select(-c(city,
+                                               population,
+                                               US_census_region,
+                                               Annual.max.temperature,
+                                               Annual.vapor.pressure.deficit,
+                                               Percent.medium.density.houses,
+                                               Percent.high.density.houses,
+                                               Percent.housing.units.built.1990.or.later,
+                                               Percent.housing.units.built.between.1950.1989,
+                                               Percent.housing.units.built.before.1950,
+                                               Percent.impervious.area,res_billed_gallons,
+                                               total_billed_gallons,
+                                               Total.housing.units,
+                                               Area.high.development.NLCD,
+                                               Area.medium.development.NLCD,
+                                               Area.open.NLCD,
+                                               Area.low.development.NLCD,
+                                               Service.area.sq.meters))
+
+# Training LR
+
+Water_Char_RR <- subset(Water_Char_res, select = -c(1:4, 12, 22:26))
+
+# Name training and testing data
+index = sample(1:nrow(Water_Char_sub), 0.7*nrow(Water_Char_sub))
+train = Water_Char_sub[index,] # Create the training data
+test = Water_Char_sub[-index,] # Create the test data
+
+lr_train = lm(Water.percap.res ~ ., data = train)
+#summary(lr_train)
+
+```
+
+### Plot of residuals and outliers
+
+```{r, fig.width=5, fig.height=6, fig.align = 'center'}
+
+# Plot the residuals
+
+fit_resid <- data.frame(lr_train$fitted.values, lr_train$residuals)
+fitted <- lr_train$fitted.values
+resid <- lr_train$residuals
+colnames(fit_resid)[1] <- "Fitted_values"
+colnames(fit_resid)[2] <- "Residuals"
+
+ols_plot_resid_lev(lr_train)
+```
+
+### Discussion of residuals and outliers
+
+The plot shows 3 outliers and 3 residuals. It is important to understand the outstanding datapoints that could be influencing the model in a way that is untrue to the actual result. Thus, employing weighted least squares, selectively choosing variables, and conducting ridge regression helps to downweight outliers and find the most true version of the model that describes per capita water use.
+
+# Ridge Regression Fit
+
+## Column
+
+### Background
+Ridge regression is used to heavily weight variables that contribute most to the independent variable.
+
+The dimensions for training and testing data are set under a 70% - 30% split, respectively. Upon analyzing a preliminary scatter plot of the variables against water use, it was found that climate region, annual precipitation, family income, GDP per capita, percent single family houses, percent of houses built before 1990, median room, and log of population density have likely correlations with water use. These variables will be used in the ridge regression analysis.
+
+Question: Which variables included in the regression have the highest influence on per capita water demand?
+
+### Ridge Regression
+
+```{r}
+
+# Select relevant columns
+cols = c("Climate_region", "Annual.precipitation", "Family.income.2010","GDP.per.capita.2016", "Percent.single.family.houses", "Percent.housing.units.built.earlier.to.1990", "Median.rooms", "Pop.density.log", "Water.percap.res")
+
+cols_x = c("US_census_region","Climate_region", "Annual.precipitation", "Family.income.2010","GDP.per.capita.2016", "Percent.single.family.houses", "Percent.housing.units.built.earlier.to.1990", "Median.rooms", "Pop.density.log")
+
+# Center and scale
+pre_proc_val <- preProcess(train[,cols], method = c("center", "scale"))
+
+train[,cols] = predict(pre_proc_val, train[,cols])
+test[,cols] = predict(pre_proc_val, test[,cols])
+
+# Regularization
+
+dummies <- dummyVars(Water.percap.res ~ ., data = Water_Char_sub[,cols])
+
+train_dummies = predict(dummies, newdata = train[,cols])
+
+test_dummies = predict(dummies, newdata = test[,cols])
+
+```
+
+
+```{r}
+# Evaluate Performance
+
+#Step 1 - create the evaluation metrics function
+
+eval_metrics = function(model, df, predictions, target){
+    resids = df[,target] - predictions
+    resids2 = resids**2
+    N = length(predictions)
+    r2 = as.character(round(summary(model)$r.squared, 2))
+    adj_r2 = as.character(round(summary(model)$adj.r.squared, 2))
+    RSME = as.character(round(sqrt(sum(resids2)/N), 2))
+    list(adj_r2,RSME) #RMSE
+    
+
+}
+
+# Step 2 - predicting and evaluating the model on train data
+predictions <- predict(lr_train, newdata = train)
+train_OG <- eval_metrics(lr_train, train, predictions, target = 'Water.percap.res')
+
+# Step 3 - predicting and evaluating the model on test data
+predictions <- predict(lr_train, newdata = test)
+test_OG <- eval_metrics(lr_train, test, predictions, target = 'Water.percap.res')
+```
+
+```{r}
+# Name testing and training data for x and y
+x_train = as.matrix(train_dummies)
+y_train = train$Water.percap.res
+
+x_test = as.matrix(test_dummies)
+y_test = test$Water.percap.res
+
+# Step 1: using glmnet
+lambdas <- 10^seq(3, -2, by = -.1)
+fit <- glmnet(x_train, y_train, nlambda = 25, alpha = 0, family = 'gaussian', lambda = lambdas)
+
+# Step 2: using cv.glmnet find the optimal lambda
+cv_fit <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas)
+plot(cv_fit)
+title("MSE versus Log(lambda) for Ridge Regression", line = 3)
+optimal_lambda <- cv_fit$lambda.min
+```
+
+### Optimal Lambda
+
+The optimal lambda value that minimizes the mean squared errors was found to be `r optimal_lambda`.
+
+### Find the coefficients of the best model
+
+```{r}
+
+# Step 3: Find the coefficients of the best model
+best_fit <- glmnet(x_train, y_train, alpha = 0, lambda = optimal_lambda)
+coef(best_fit)
+
+```
+### Discussion of coefficients
+
+The coefficients for the model show that the higher the coefficient, the more influence this coefficient has on water demand. Depending on how the training and testing data is split, these coefficients may vary slightly. However, it can regularly be observed that climate region, annual precipitation, housing size, and housing age have a strong effect when compared with the other variables. 
+
+
+```{r}
+# Evaluate Performance
+
+# Compute R^2 from true and predicted values
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- as.character(round(1 - SSE / SST, 3))
+  RMSE = as.character(round(sqrt(SSE/nrow(df)), 3))
+  
+  # Model performance metrics
+list(RMSE, R_square)
+  
+}
+
+# Prediction and evaluation on train data
+predictions_train <- predict(fit, s = optimal_lambda, newx = x_train)
+train_RR <- eval_results(y_train, predictions_train, train)
+
+# Prediction and evaluation on test data
+predictions_test <- predict(fit, s = optimal_lambda, newx = x_test)
+test_RR <- eval_results(y_test, predictions_test, test)
+
+```
+
+## Column
+
+### Improve the model by employing Weighted Least Squares
+
+To improve the ridge regression, weighted least squares was employed to down weight the outliers and high variance datapoints.
+
+```{r}
+# Obtain weights
+abs_resid <- abs(resid)
+error_sd_df <- data.frame(fitted, resid, abs_resid)
+error_sd <- lm(abs_resid ~ fitted, data = error_sd_df)
+error_sd_fit <- error_sd$fitted.values
+wts <- 1/ (error_sd_fit^2)
+
+# Step 1: using glmnet
+lambdas <- 10^seq(3, -2, by = -.1)
+fit <- glmnet(x_train, y_train, nlambda = 25, alpha = 0, family = 'gaussian', lambda = lambdas, weights = wts )
+
+# Step 2: using cv.glmnet find the optimal lambda
+cv_fit <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas, weights = wts)
+plot(cv_fit)
+title("MSE versus Log(lambda) for WLS Ridge Regression", line = 3)
+optimal_lambda <- cv_fit$lambda.min
+```
+
+### Optimal lambda
+
+The optimal lambda value that minimizes the mean squared errors was found to be `r optimal_lambda`.
+
+### Find the coefficients of the best model
+
+```{r}
+# Step 3: Find the coefficients of the best model
+best_fit <- glmnet(x_train, y_train, alpha = 0, lambda = optimal_lambda, weights = wts)
+coef(best_fit)
+
+```
+
+### Discussion of coefficients
+
+The coefficients for the weighted least squares ridge regression model show similar coefficient results as the regular ridge regression. The most impactful generally being climate region, annual precipitation, housing size, and housing age when compared with the other variables. 
+
+```{r}
+# Evaluate performance
+
+# Compute R^2 from true and predicted values
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- as.character(round(1 - SSE / SST, 3))
+  RMSE = as.character(round(sqrt(SSE/nrow(df)), 3))
+
+  # Model performance metrics
+list(RMSE, R_square)
+  
+}
+
+# Prediction and evaluation on train data
+predictions_train <- predict(fit, s = optimal_lambda, newx = x_train)
+train_WRR = eval_results(y_train, predictions_train, train)
+
+# Prediction and evaluation on test data
+predictions_test <- predict(fit, s = optimal_lambda, newx = x_test)
+test_WRR = eval_results(y_test, predictions_test, test)
+```
+
+## Column
+
+These summary tables show that the model improved from linear regression, to ridge regression, to ridge regression with weighted least squares
+
+### Original Linear Regression
+
+```{r}
+OG_eval = data.frame(unlist(train_OG),unlist(test_OG))
+
+#to name the columns we use names() function
+names(OG_eval) = c("Training","Testing")
+rownames(OG_eval) = c("R Sqr.","RMSE")
+kable(OG_eval)
+```
+### Original Ridge Regression
+```{r}
+
+RR_eval = data.frame(unlist(train_RR),unlist(test_RR))
+
+#to name the columns we use names() function
+names(RR_eval) = c("Training","Testing")
+rownames(RR_eval) = c("R Sqr.","RMSE")
+kable(RR_eval)
+```
+### Weighted Least Squares Ridge Regression
+```{r}
+
+WRR_eval = data.frame(unlist(train_WRR),unlist(test_WRR))
+
+#to name the columns we use names() function
+names(WRR_eval) = c("Training","Testing")
+rownames(WRR_eval) = c("R Sqr.","RMSE")
+kable(WRR_eval)
+```
+
+# LOESS
+
+## Column
+### Optimal Span for Pop.density.log Degree 1
+The optimal span for Pop.density.log for degree 1 is 0.8977491.
+```{r}
+fit.loess.opt1 <- with(Water_Char_full, loess.as(Pop.density.log, Water.percap.res,
+                                                degree = 1, criterion = c("aicc", "gcv")[2],
+                                                user.span = NULL, plot = F))
+summary(fit.loess.opt1)
+```
+
+### Optimal Span for Pop.density.log Degree 2
+The optimal span for Pop.density.log for degree 2 is 0.9309218.
+```{r}
+fit.loess.opt2 <- with(Water_Char_full, loess.as(Pop.density.log, Water.percap.res,
+                                                degree = 2, criterion = c("aicc", "gcv")[2],
+                                                user.span = NULL, plot = F))
+summary(fit.loess.opt2)
+```
+
+### Optimal Span for Annual.precipitation Degree 1
+The optimal span for Annual.precipitation for degree 1 is 0.6544601.
+```{r}
+fit.loess.optAPrecip1 <- with(Water_Char_full, loess.as(Annual.precipitation, Water.percap.res,
+                                                degree = 1, criterion = c("aicc", "gcv")[2],
+                                                user.span = NULL, plot = F))
+summary(fit.loess.optAPrecip1)
+```
+
+### Optimal Span for Annual.precipitation Degree 2
+The optimal span for Annual.precipitation for Degree 2 is 0.940681
+```{r}
+fit.loess.optAPrecip2 <- with(Water_Char_full, loess.as(Annual.precipitation, Water.percap.res,
+                                                degree = 2, criterion = c("aicc", "gcv")[2],
+                                                user.span = NULL, plot = F))
+summary(fit.loess.optAPrecip2)
+```
+
+## Column
+### LOESS Fits for Population.density.log, span = 0.1
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Pop.density.log, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.1, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.1, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Pop.density.log versus Water Per Capita, span = 0.1") + 
+  labs(x = "Population.density.log", y = "Water per Capita")
+```
+
+### LOESS Fits for Population.density.log, span = 0.15
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Pop.density.log, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.15, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.15, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Pop.density.log versus Water Per Capita, span = 0.15")  + 
+  labs(x = "Population.density.log", y = "Water per Capita")
+```
+
+### LOESS Fits for Population.density.log, span = 0.25
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Pop.density.log, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.25, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.25, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Pop.density.log versus Water Per Capita, span = 0.25") + 
+  labs(x = "Population.density.log", y = "Water per Capita")
+```
+
+### LOESS Fits for Population.density.log, Optimal Span
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Pop.density.log, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.8977491, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.9309218, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Pop.density.log versus Water Per Capita, Optimal Spans") + 
+  labs(x = "Population.density.log", y = "Water per Capita")
+```
+
+### Discussion for Population.density.log LOESS fit
+Based on the plots above, as the span increases, the fit becomes smoother.
+The curve follows each data point and especially the "outlier" ones when the span
+is low. As the span increases and soon reaches it's optimal, the lines smoothen
+out for each degree.
+
+## Column
+### LOESS Fits for Annual.precipitation, span = 0.1
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Annual.precipitation, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.1, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.1, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Annual.precipitation versus Water per Capita, span = 0.1") + 
+  labs(x = "Annual.precipitation", y = "Water per Capita")
+```
+
+### LOESS Fits for Annual.precipitation, span = 0.15
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Annual.precipitation, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.15, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.15, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Annual.precipitation versus Water per Capita, span = 0.15") + 
+  labs(x = "Annual.precipitation", y = "Water per Capita")
+```
+
+### LOESS Fits for Annual.precipitation, span = 0.25
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Annual.precipitation, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.25, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.25, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Annual.precipitation versus Water per Capita, span = 0.25") + 
+  labs(x = "Annual.precipitation", y = "Water per Capita")
+```
+
+### LOESS Fits for Annual.precipitation, Optimal Span
+```{r, fig.width=8, fig.height=8, fig.align = 'center'}
+ggplot(Water_Char_full, aes(x = Annual.precipitation, y = Water.percap.res)) + geom_point() +
+  geom_smooth(method = "loess", span = 0.6544601, se = F, method.args = list(degree = 1), aes(color = "degree 1")) + 
+  geom_smooth(method = "loess", span = 0.940681, se = F, method.args = list(degree = 2), aes(color = "degree 2")) + 
+  scale_color_manual(name = "Degree", breaks = c("degree 1", "degree 2"), values = c("red", "blue")) +
+  theme(legend.position = "bottom") + ggtitle("LOESS Fit for Annual.precipitation versus Water per Capita, Optimal Spans") + 
+  labs(x = "Annual.precipitation", y = "Water per Capita")
+```
+
+### Discussion for Annual.precipitation LOESS fit
+Based on the plots above, as the span increases, the fit becomes smoother.
+When the span is low, the curve follows the data points, which makes the curve
+less smooth and more bumpy.
+
+# kNN Classification
+```{r}
+Water_Char_kNN_df <- Water_Char_full %>% select( c(Median.rooms,
+                                                Annual.precipitation,
+                                                Family.income.2010,
+                                                Water.percap.res,
+                                                Climate_region))
+Water_Char_kNN_df$Climate_region <- factor(Water_Char_kNN_df$Climate_region)
+Water_Char_kNN_df$Family.income.2010 <- as.numeric(Water_Char_kNN_df$Family.income.2010)
+# str(Water_Char_kNN_df)
+
+# Subset data into 70/30 training/testing split
+index <- sample(1:nrow(Water_Char_kNN_df), round(nrow(Water_Char_kNN_df) * 0.7))
+training_df <- Water_Char_kNN_df[index, ]
+testing_df <- Water_Char_kNN_df[-index, ]
+
+# Store the training/testing data features
+train_features <- training_df[, 1:4]
+test_features <- testing_df[, 1:4]
+
+train_classes <- training_df$Climate_region
+test_classes <- testing_df$Climate_region
+```
+
+## Column
+### Water Per Capita versus Median Rooms
+```{r}
+ggplot(training_df, aes(x = Median.rooms, y = Water.percap.res, color = Climate_region)) + geom_point() + theme_bw() +
+geom_point(data = testing_df, aes(x = Median.rooms, y = Water.percap.res), color = "black", pch = 5, size = 3)  +
+  labs(title = "Water Per Capita versus Median Rooms", x = "Median Rooms", y = "Water per Capita", 
+       color = "Climate Region")
+```
+
+### kNN Classes, k = 5
+```{r}
+Water_Char_knn_classes <- knn(train = train_features, test = test_features,
+cl = train_classes, k = 5)
+Water_Char_knn_classes[1:nrow(test_features)]
+
+```
+
+### kNN Classes, k = 50
+```{r}
+Water_Char_knn_classes50 <- knn(train = train_features, test = test_features,
+cl = train_classes, k = 50)
+Water_Char_knn_classes50[1:nrow(test_features)]
+
+```
+
+## Column
+### Water Per Capita versus Annual Precipitation
+```{r}
+ggplot(training_df, aes(x = Annual.precipitation, y = Water.percap.res, color = Climate_region)) + geom_point() + theme_bw() +
+geom_point(data = testing_df, aes(x = Annual.precipitation, y = Water.percap.res), color = "black", pch = 5, size = 3) + 
+  labs(title = "Water Per Capita versus Annual Precipitation", x = "Annual Precipitation", y = "Water per Capita", 
+       color = "Climate Region")
+```
+
+### Cross Table, k = 5
+```{r, fig.height=10}
+CrossTable(x = Water_Char_knn_classes, y = test_classes, prop.chisq = FALSE, prop.t = F, prop.r = F)
+```
+
+### Cross Table, k = 50
+```{r, fig.height=10}
+CrossTable(x = Water_Char_knn_classes50, y = test_classes, prop.chisq = FALSE, prop.t = F, prop.r = F)
+```
+
+
+## Column
+### Water Per Capita versus Population Density
+```{r}
+ggplot(training_df, aes(x = Family.income.2010, y = Water.percap.res, color = Climate_region)) + geom_point() + theme_bw() +
+geom_point(data = testing_df, aes(x = Family.income.2010, y = Water.percap.res), color = "black", pch = 5, size = 3) +
+  labs(title = "Water Per Capita versus Population Density", x = "Population Density", y = "Water per Capita", 
+       color = "Climate Region")
+```
+
+
+### Confusion Matrix, k = 5
+```{r, fig.height=10}
+confusionMatrix(data = Water_Char_knn_classes, reference = test_classes)
+```
+
+### Confusion Matrix, k = 50
+```{r, fig.height=10}
+confusionMatrix(data = Water_Char_knn_classes50, reference = test_classes)
+```
+
+### Discussion of kNN
+The accuracy rate for k = 5 is 0.4483 The accuracy rate stands for the number
+of correct classifications over the number of predictions. In this case, the model
+predicted 44.83% correct classifications. The error rate for is 0.5517. Since k = 5
+is small, the classification rate for this k is low as there are many levels of
+climate region present.
+
+When we increase k to be 50, the levels of classifications decrease from 3 to 2
+and sometimes even 1. The accuracy rate for k = 50 is 0.3793. which means that 
+this model predicted 37.93% correct classifications. The error rate is 0.6207. 
+The increase in k leads to the most dominant levels to be shown, which in this
+case were Continental and Temperate climate regions.
+
+
+# Naive Bayes
+
+## Column
+
+### What is Naive Bayes?
+
+Naive Bayes is a machine learning model used to classify variables based on probability and Bayes theorem. This classification methods works under the assumption of conditional independence, thus variables were carefully selected that describe different aspects of the socio-economic-physical system of the water demand cycle. Upon analyzing a preliminary scatter plot of the variables against water use, it was found that climate region, annual precipitation, family income, GDP per capita, percent single family houses, percent of houses built before 1990, median room, and log of population density have likely correlations with water use. These variables will be used in the Naive Bayes classification.
+
+### Question
+
+Given data of water demand and socio-economic-physical factors, predict which climate region a data point belongs to.
+
+### Table of the predicted US Climate Regions versus reference 
+
+```{r}
+Water_Char_sub <- na.omit(Water_Char_sub)
+Water_Char_sub$Climate_region <- as.factor(Water_Char_sub$Climate_region)
+model <- naiveBayes(Climate_region ~ ., data = Water_Char_sub)
+newclass <- predict(model, newdata = Water_Char_sub, type = "class")
+CM <- confusionMatrix(newclass, Water_Char_sub$Climate_region)$table
+kable(confusionMatrix(newclass, Water_Char_sub$Climate_region)$table)
+```
+
+### Accuracy Matrix
+
+```{r}
+CM <- confusionMatrix(newclass, Water_Char_sub$Climate_region)$overall
+kable(confusionMatrix(newclass, Water_Char_sub$Climate_region)$overall)
+accuracy_percent <- CM[1]*100
+accuracy_pvalue <- CM[6]
+```
+The accuracy matrix shows that Naive Bayes analysis predicts US Climate Region to `r accuracy_percent`% and has a p-value of `r accuracy_pvalue`, indicating that prediction is sound.
+
+## Column
+
+### Question
+
+Given data of location and socio-economic-physical factors, predict if a data point has low, medium, or high water use.
+
+### Table of the predicted high or low water use versus reference
+
+```{r}
+Water_Char_NB2 <- Water_Char_sub
+
+Water_Char_NB2$Water.Use.Status <- Water_Char_NB2$Water.Use.Status
+
+Water_Char_NB2$Water.Use.Status[Water_Char_NB2$Water.percap.res < 1500] <- "Low"       
+Water_Char_NB2$Water.Use.Status[Water_Char_NB2$Water.percap.res >= 1500 & Water_Char_NB2$Water.percap.res < 2500] <- "Medium"
+Water_Char_NB2$Water.Use.Status[Water_Char_NB2$Water.percap.res >= 2500] <- "High"
+
+
+# Remove columns we don't want
+Water_Char_NB2 <- subset(Water_Char_NB2, select = -c(Water.percap.res))
+
+Water_Char_NB2$Water.Use.Status <- as.factor(Water_Char_NB2$Water.Use.Status)
+model <- naiveBayes(Water.Use.Status ~ ., data = Water_Char_NB2)
+newclass <- predict(model, newdata = Water_Char_NB2, type = "class")
+CM <- kable(confusionMatrix(newclass, Water_Char_NB2$Water.Use.Status)$table)
+kable(confusionMatrix(newclass, Water_Char_NB2$Water.Use.Status)$table)
+```
+### Accuracy Matrix
+
+```{r}
+CM <- confusionMatrix(newclass, Water_Char_NB2$Water.Use.Status)$overall
+kable(confusionMatrix(newclass, Water_Char_NB2$Water.Use.Status)$overall)
+accuracy_percent <- CM[1]*100
+accuracy_pvalue <- CM[6]
+```
+The accuracy matrix shows that Naive Bayes analysis predicts high, medium, and low water use to `r accuracy_percent`% and has a p-value of `r accuracy_pvalue`, indicating that prediction is not as accurate as the Climate Region, especially when estimating low water use. However, the p-value is still significant, indicating a sound classification. Low water use is less than 1500 gallon per capita per month (GPCM), medium water use is between 1500 - 2500 GPCM, and high water use is greater than 2500 GPCM.
+
+# Logistic Regression
+
+## Column
+
+### Background
+Logistic regression is used to visually analyse successes and failures in a dataframe. The independent (success or failure) variable is plotted against a dependent variable and the resultant curve shows how the dependent variable moves the independent variable towards a success or failure. In this analysis, a success is high water use (1) and a failure is low water use (0). Like ridge regression and Naive Bayes, it was found that climate region, annual precipitation, family income, GDP per capita, percent single family houses, percent of houses built before 1990, median room, and log of population density have likely correlations with water use. These variables will be used in the logistic regression.
+
+### Question
+
+How does annual precipitation affect water use?
+
+### Logistic regression showing high and low water use based on precipitation values
+
+```{r}
+#rm(Water_Char_log)
+Water_Char_log <- Water_Char_sub
+Water_Char_log$Water.percap.high <- ifelse(Water_Char_log$Water.percap.res > 2150, 1, 0)
+
+Water_Char_log$Water.Use.Status <- ifelse(Water_Char_log$Water.percap.res > 2150, "High: > 2150 GPCM", "Low: < 2150 GPCM")
+
+# Remove columns we don't want
+Water_Char_log <- subset(Water_Char_log, select = -c(Water.percap.res))
+
+lm_log = glm(Water.percap.high ~ ., data = Water_Char_log, family = binomial)
+
+ggplot(Water_Char_log, aes(x = Annual.precipitation, y = Water.percap.high)) +
+geom_point(aes(color = Water.Use.Status), position = position_jitter(height = 0.03, width = 0)) +
+geom_smooth(method = "glm", method.args = list(family="binomial")) +
+labs(y = "P(High Water Use)", x = "Annual Precipitation (in)", title = "Logistic Regression: High Water User versus Precipitaiton") + theme_bw()
+
+```
+
+### Discussion
+In this logistic regression, high water use is greater than 2150 gallons per capita per month (GPCM) and indicated by a 1. Low water use is less than 2150 GPCM and indicated by a 0. As expected, the logistic regression indicates high water use (1) when precipitation values are low. This is likely due to people irrigating their lawns when precipitation is not naturally provided.
+
+## Column
+
+### Question
+
+How does climate region and annual precipitation affect water use?
+
+### Logistic regression showing high and low water use based on precipitation in different climate regions
+
+```{r}
+#rm(Water_Char_log)
+Water_Char_log2 <- Water_Char_sub
+Water_Char_log2$Water.percap.high <- ifelse(Water_Char_log2$Water.percap.res > 2150, 1, 0)
+
+Water_Char_log2$Water.Use.Status <- ifelse(Water_Char_log2$Water.percap.res > 2150, "High: > 2150 GPCM", "Low: < 2150 GPCM")
+
+# Remove columns we don't want
+Water_Char_log <- subset(Water_Char_log2, select = -c(Water.percap.res))
+
+lm_log = glm(Water.percap.high ~ ., data = Water_Char_log2, family = binomial)
+
+ggplot(Water_Char_log2, aes(x = Annual.precipitation, y = Water.percap.high, color = Climate_region)) +
+geom_point(aes(color = Climate_region), position = position_jitter(height = 0.03, width = 0)) +
+geom_smooth(method = "glm", method.args = list(family="binomial"), se = F) +
+scale_y_continuous(breaks = seq(0,1, by =0.05)) + theme_bw() +
+labs(y = "P(High Water Use)", x = "Annual Precipitation (in)", title = "Logistic Regression: High Water User versus Precipitaiton 
+     for US Climate Regions") + theme_bw()
+
+
+```
+
+### Discussion
+
+This logistic regression shows high (1) or low (0) water use per climate region and annual precipitation. As expected, arid climates have low precipitation and high water use. Continental climates and temperate climates are similar, but continental climates are located in the interior United States and have less temperature regulation since they are located further from the ocean. Thus, they may have hotter, dryer summers and require irrigation. Temperate climates, on the other hand, are moderated by the ocean and receive regular precipitation and moderate temperatures [2]. 
+
+
+## Column
+
+### Question
+
+How does the percent of single family houses in a community affect water use?
+
+### Logistic regression showing high and low water use based on percent of single family houses
+
+```{r}
+#rm(Water_Char_log)
+Water_Char_log3 <- Water_Char_sub
+Water_Char_log3$Water.percap.high <- ifelse(Water_Char_log3$Water.percap.res > 2150, 1, 0)
+
+Water_Char_log3$Water.Use.Status <- ifelse(Water_Char_log3$Water.percap.res > 2150, "High: > 2150 GPCM", "Low: < 2150 GPCM")
+
+# Remove columns we don't want
+Water_Char_log <- subset(Water_Char_log3, select = -c(Water.percap.res))
+
+lm_log = glm(Water.percap.high ~ ., data = Water_Char_log3, family = binomial)
+
+ggplot(Water_Char_log3, aes(x = Percent.single.family.houses, y = Water.percap.high)) +
+geom_point(aes(color = Water.Use.Status), position = position_jitter(height = 0.03, width = 0)) +
+geom_smooth(method = "glm", method.args = list(family="binomial")) +
+labs(y = "P(High Water Use)", x = "Percent Single Family Homes", title = "Logistic Regression: High Water User versus Single 
+     Family Housing Percentage") + theme_bw()
+
+```
+
+### Discussion
+
+Compared to a higher percentage of multi-family houses and apartment buildings, a higher percentage of single family houses usually indicates higher irrigable lawn area. People with large lawns are likely to irrigate them in dry summer months, attempting to keep their yard green for recreation, entertainment, and visual purposes. This result drives higher water use in areas with more single family houses.
+
+# References
+
+### References
+[1] https://www.hydroshare.org/resource/feb5af8990914ce2b28f18b10d65c2a2/
+
+[2] https://www.metoffice.gov.uk/weather/climate/climate-explained/climate-zones#:~:text=Continental%20climates%20(mostly%20found%20in,buffering%20effect%20of%20nearby%20oceans.
